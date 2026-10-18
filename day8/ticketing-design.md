@@ -6,17 +6,15 @@ TicketHub is a website that sells tickets for concerts and events. It has 2 mill
 
 The hard part is not the amount of data. It is making sure that, when thousands of people click at the same moment, **every seat is sold to exactly one person**, and that the site stays up and feels fair while it happens.
 
-This document covers requirements, estimates, the API, the data model, how double-booking is prevented, the architecture, trade-offs, alternatives and risks.
-
 ### Goals
 
 - Let users browse events, see seats, hold seats, pay and see their tickets.
 - Never sell the same seat twice.
 - Survive a "big sale" without crashing, and treat buyers fairly.
 
-### Non-goals (deliberately not designed here)
+### Non-goals
 
-- Organizer tools for creating events and seat maps (assume events and seats are loaded by an admin script).
+- Organizer tools for creating events and seat maps (events and seats are loaded by an admin script).
 - Resale or ticket transfer between users.
 - Refund policies, recommendations and search ranking.
 - Multi-region deployment.
@@ -95,10 +93,12 @@ Assumptions: the window is 600 s; half of the 200,000 people arrive in the first
 
 1. Design for the spike, not the average. A normal day is trivial for one server and one database.
 2. Data size is irrelevant (0.5 GB/year). The problem is **concurrency**: thousands of writes aimed at the same 20,000 rows.
-3. Reads (seat map refreshes) are the bulk of the traffic and can be cached. Writes (holds) cannot be cached, because they must be correct. So effort goes to protecting the write path.
+3. Reads (seat-map refreshes) are the bulk of the traffic and can be cached. Writes (holds) cannot be cached, because they must be correct. So effort goes to protecting the write path.
 4. 90% of the people will not get a seat, so how we handle waiting and failing is part of the design.
 
 ---
+
+
 
 ## 3. API
 
@@ -196,6 +196,7 @@ events 1 --- * orders
 - One order has many tickets (1 : N) and one or more payment attempts (1 : N).
 - Each ticket points to exactly one event seat (1 : 1, enforced by UNIQUE).
 
+
 ---
 
 ## 5. How double-booking is prevented
@@ -219,7 +220,7 @@ WHERE id = ANY(:seatIds)          -- seat ids sorted ascending
 --                                            no  -> ROLLBACK, return 409
 ```
 
-- The check ("is it free?") and the write ("take it") are **one statement**, so there is no gap for another request to slip into.
+- The check ("is it free, or is its hold expired?") and the write ("take it") are **one statement**, so there is no gap for another request to slip into.
 - If two users go for the same seat, PostgreSQL locks the row for the first UPDATE. The second waits, then re-checks the `WHERE` condition against the new row: the seat is now held and not expired, so **0 rows match** and the second user gets `409`. Exactly one wins, and the loser always knows.
 - **All or nothing:** if only some of the requested seats were updated, we roll back, so nobody receives a half-booking.
 - **No deadlocks:** seat ids are always sorted before updating, so two users with overlapping seats lock them in the same order.
@@ -264,7 +265,7 @@ Even if the code has a bug, the database refuses invalid data:
 
 - **Check in application code:** race condition, as described above.
 - **Locks in the application servers:** servers do not share memory, so one cannot see another's lock.
-- **Redis as the source of truth:** fast, but if Redis loses data or fails over, a seat could be sold twice. See "Alternatives considered".
+- **Redis as the source of truth:** fast, but if Redis loses data or fails over, a seat could be sold twice.
 
 ---
 
@@ -328,6 +329,7 @@ flowchart TD
 6. **Preparation:** API servers are scaled up before the announced start time, and we load-test at 25,000 requests/s beforehand.
 7. **Graceful failure:** if the system is overloaded, the waiting room slows admission instead of letting the site crash. If the cache fails, reads fall back to the replicas (slower), and correctness is unaffected because it lives in the primary database. If an API server dies mid-purchase, nothing is lost: the hold and order are in the database, and an unfinished hold just expires.
 
+
 ---
 
 ## 7. Trade-offs
@@ -388,3 +390,4 @@ flowchart TD
 - Should a user be allowed several events in the same sale window, or only one at a time?
 - Should failed buyers get a "notify me if seats are released" option?
 - How long should we keep expired holds in logs for dispute handling?
+
